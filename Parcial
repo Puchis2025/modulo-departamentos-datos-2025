@@ -1,0 +1,1708 @@
+import React, { useState, useEffect, createContext, useContext, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut } from 'firebase/auth';
+import { getFirestore, doc, getDoc, setDoc, collection, onSnapshot, addDoc, deleteDoc, updateDoc, query, where, getDocs, Timestamp } from 'firebase/firestore';
+
+// Contexto para Firebase y autenticación
+const FirebaseContext = createContext(null);
+
+// Componente para el Modal Personalizado
+const CustomModal = ({ isOpen, onClose, title, children, onConfirm, showConfirmButton = true }) => {
+    if (!isOpen) return null;
+
+    return (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
+                <div className="flex justify-between items-center border-b pb-3 mb-4">
+                    <h2 className="text-xl font-semibold text-gray-800">{title}</h2>
+                    <button
+                        onClick={onClose}
+                        className="text-gray-500 hover:text-gray-700 text-2xl leading-none font-bold"
+                        aria-label="Cerrar"
+                    >
+                        &times;
+                    </button>
+                </div>
+                <div className="text-gray-700">
+                    {children}
+                </div>
+                <div className="mt-6 flex justify-end space-x-2">
+                    {showConfirmButton && onConfirm && (
+                        <button
+                            onClick={onConfirm}
+                            className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition duration-150 ease-in-out"
+                        >
+                            Confirmar
+                        </button>
+                    )}
+                    <button
+                        onClick={onClose}
+                        className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition duration-150 ease-in-out"
+                    >
+                        Cerrar
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// Componente ErrorBoundary para capturar errores en la UI
+class ErrorBoundary extends React.Component {
+    constructor(props) {
+        super(props);
+        this.state = { hasError: false, error: null, errorInfo: null };
+    }
+
+    static getDerivedStateFromError(error) {
+        // Actualiza el estado para que el siguiente renderizado muestre la UI de fallback.
+        return { hasError: true };
+    }
+
+    componentDidCatch(error, errorInfo) {
+        // También puedes registrar el error en un servicio de informes de errores
+        console.error("ErrorBoundary capturó un error: ", error, errorInfo);
+        this.setState({ error, errorInfo });
+    }
+
+    render() {
+        if (this.state.hasError) {
+            // Puedes renderizar cualquier UI de fallback personalizada
+            return (
+                <div className="flex flex-col items-center justify-center h-screen bg-red-100 text-red-800 p-6 rounded-lg shadow-md">
+                    <h1 className="text-2xl font-bold mb-4">¡Algo salió mal!</h1>
+                    <p className="text-lg text-center mb-4">
+                        Lo sentimos, ha ocurrido un error inesperado en la aplicación.
+                    </p>
+                    <details className="text-sm text-left bg-red-50 p-4 rounded-md overflow-auto max-h-60 w-full">
+                        <summary className="font-semibold cursor-pointer">Detalles del Error</summary>
+                        {this.state.error && this.state.error.toString()}
+                        <br />
+                        {this.state.errorInfo && this.state.errorInfo.componentStack}
+                    </details>
+                    <button
+                        onClick={() => window.location.reload()}
+                        className="mt-6 px-6 py-3 bg-red-600 text-white rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition duration-150 ease-in-out"
+                    >
+                        Recargar Aplicación
+                    </button>
+                </div>
+            );
+        }
+
+        return this.props.children;
+    }
+}
+
+// --- Utility Functions (moved outside App for reusability if needed) ---
+
+/**
+ * Formats a number as currency.
+ * @param {number} amount - The amount to format.
+ * @returns {string} The formatted currency string.
+ */
+function formatCurrency(amount) {
+    return new Intl.NumberFormat('es-MX', { style: 'decimal', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
+}
+
+/**
+ * Converts a number to words in Spanish.
+ * This is a simplified implementation and might not cover all edge cases.
+ * For a robust solution, consider a dedicated library.
+ * @param {number} num - The number to convert.
+ * @returns {string} The number in words.
+ */
+function numberToWords(num) {
+    const units = ['', 'un', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve'];
+    const teens = ['diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciséis', 'diecisiete', 'dieciocho', 'diecinueve'];
+    const tens = ['', '', 'veinte', 'treinta', 'cuarenta', 'cincuenta', 'sesenta', 'setenta', 'ochenta', 'noventa'];
+    const hundreds = ['', 'ciento', 'doscientos', 'trescientos', 'cuatrocientos', 'quinientos', 'seiscientos', 'setecientos', 'ochocientos', 'novecientos'];
+
+    function convertLessThanOneThousand(n) {
+        if (n === 0) return '';
+        if (n < 10) return units[n];
+        if (n < 20) return teens[n - 10];
+        if (n < 100) {
+            const t = tens[Math.floor(n / 10)];
+            const u = units[n % 10];
+            return t + (u ? ' y ' + u : '');
+        }
+        const h = hundreds[Math.floor(n / 100)];
+        const rest = convertLessThanOneThousand(n % 100);
+        return h + (rest ? ' ' + rest : '');
+    }
+
+    if (num === 0) return 'cero';
+    let integerPart = Math.floor(num);
+    let decimalPart = Math.round((num - integerPart) * 100); // Get two decimal places
+
+    let words = '';
+
+    if (integerPart >= 1000000) {
+        words += convertLessThanOneThousand(Math.floor(integerPart / 1000000)) + ' millones ';
+        integerPart %= 1000000;
+    }
+
+    if (integerPart >= 1000) {
+        const thousands = Math.floor(integerPart / 1000);
+        if (thousands === 1) {
+            words += 'mil ';
+        } else {
+            words += convertLessThanOneThousand(thousands) + ' mil ';
+        }
+        integerPart %= 1000;
+    }
+
+    words += convertLessThanOneThousand(integerPart);
+
+    let result = words.trim();
+    if (decimalPart > 0) {
+        result += ` con ${decimalPart}/100`;
+    } else {
+        result += ` con 00/100`;
+    }
+    return result.toUpperCase();
+}
+
+/**
+ * Formats a date to 'DD DE MES_ABREV DE YEAR' (e.g., '06 DE JUL DE 2025').
+ * @param {Date} date - The date object.
+ * @returns {string} The formatted date string.
+ */
+function formatDateForContract(date) {
+    const day = String(date.getDate()).padStart(2, '0');
+    const monthNames = ['ENE', 'FEB', 'MAR', 'ABR', 'MAY', 'JUN', 'JUL', 'AGO', 'SEP', 'OCT', 'NOV', 'DIC'];
+    const month = monthNames[date.getMonth()];
+    const year = date.getFullYear();
+    return `${day} DE ${month} DE ${year}`;
+}
+
+/**
+ * Validates if the tenant is 18 years or older.
+ * @param {string} dobString - Date of birth inYYYY-MM-DD format.
+ * @returns {boolean} True if 18 or older, false otherwise.
+ */
+function validateAge(dobString) {
+    const dob = new Date(dobString);
+    const today = new Date();
+    let age = today.getFullYear() - dob.getFullYear();
+    const m = today.getMonth() - dob.getMonth();
+    if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) {
+        age--;
+    }
+    return age >= 18;
+}
+
+// --- Componentes de Sección (Módulos) ---
+
+// Componente de la Sección de Inicio
+const HomeSection = () => (
+    <div className="p-6 bg-white rounded-lg shadow-md">
+        <h2 className="text-3xl font-bold text-gray-800 mb-4">Bienvenido al Sistema de Cobranza App</h2>
+        <p className="text-gray-700 leading-relaxed">
+            Esta aplicación te permite gestionar de manera eficiente tus departamentos, arrendatarios y contratos de arrendamiento.
+            Utiliza el menú lateral para navegar entre los diferentes módulos y acceder a sus funcionalidades.
+        </p>
+        <div className="mt-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <div className="bg-blue-50 p-4 rounded-lg shadow-sm border border-blue-200">
+                <h3 className="text-xl font-semibold text-blue-800 mb-2">Gestión de Departamentos</h3>
+                <p className="text-blue-700 text-sm">Administra la información de tus propiedades, rentas y depósitos.</p>
+            </div>
+            <div className="bg-green-50 p-4 rounded-lg shadow-sm border border-green-200">
+                <h3 className="text-xl font-semibold text-green-800 mb-2">Gestión de Arrendatarios</h3>
+                <p className="text-green-700 text-sm">Registra y organiza los datos de tus inquilinos, incluyendo fechas de contrato.</p>
+            </div>
+            <div className="bg-purple-50 p-4 rounded-lg shadow-sm border border-purple-200">
+                <h3 className="text-xl font-semibold text-purple-800 mb-2">Generación de Contratos</h3>
+                <p className="text-purple-700 text-sm">Crea contratos de arrendamiento automáticamente y descárgalos en PDF.</p>
+            </div>
+        </div>
+    </div>
+);
+
+// Componente de la Sección de Departamentos
+const DepartamentosSection = ({ activeSubSection, setActiveSubSection }) => {
+    const { db, userId, showModal } = useContext(FirebaseContext);
+    const [departments, setDepartments] = useState([]);
+    const [currentDepartment, setCurrentDepartment] = useState(null);
+
+    // Form state for departments
+    const [numeroDepartamento, setNumeroDepartamento] = useState('');
+    const [rentaMensual, setRentaMensual] = useState('');
+    const [deposito, setDeposito] = useState('');
+    const [ocupantesMaximos, setOcupantesMaximos] = useState('');
+    const [cargoAdicionalOcupanteExtra, setCargoAdicionalOcupanteExtra] = useState('0');
+    const [estadoOcupacion, setEstadoOcupacion] = useState('Disponible'); // New field: Estado de Ocupación
+    const [descripcionDepartamento, setDescripcionDepartamento] = useState('');
+    const [calle, setCalle] = useState(''); // New field: Calle
+    const [numeroExterior, setNumeroExterior] = useState(''); // New field: Número Exterior
+    const [numeroInterior, setNumeroInterior] = useState(''); // New field: Número Interior
+    const [colonia, setColonia] = useState(''); // New field: Colonia
+    const [ciudad, setCiudad] = useState(''); // New field: Ciudad
+    const [estadoDireccion, setEstadoDireccion] = useState(''); // New field: Estado (Dirección)
+    const [codigoPostal, setCodigoPostal] = useState(''); // New field: Código Postal
+
+
+    // Effect to load departments data
+    useEffect(() => {
+        if (!db || !userId) return;
+
+        const q = collection(db, `artifacts/${__app_id}/users/${userId}/departamentos`);
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const departmentsData = [];
+            snapshot.forEach(doc => {
+                departmentsData.push({ id: doc.id, ...doc.data() });
+            });
+            setDepartments(departmentsData);
+        }, (error) => {
+            console.error("Error loading departments:", error);
+            showModal("Error de Carga", "No se pudieron cargar los departamentos.");
+        });
+
+        return () => unsubscribe(); // Cleanup listener
+    }, [db, userId, showModal]);
+
+    // Handle form submission (Add/Edit Department)
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        try {
+            const departmentData = {
+                numeroDepartamento: numeroDepartamento,
+                rentaMensual: parseFloat(rentaMensual),
+                deposito: parseFloat(deposito),
+                ocupantesMaximos: parseInt(ocupantesMaximos),
+                cargoAdicionalOcupanteExtra: parseFloat(cargoAdicionalOcupanteExtra || 0),
+                estadoOcupacion: estadoOcupacion, // Save new field
+                descripcion: descripcionDepartamento,
+                calle: calle, // Save new field
+                numeroExterior: numeroExterior, // Save new field
+                numeroInterior: numeroInterior, // Save new field
+                colonia: colonia, // Save new field
+                ciudad: ciudad, // Save new field
+                estadoDireccion: estadoDireccion, // Save new field
+                codigoPostal: codigoPostal // Save new field
+            };
+
+            if (currentDepartment) {
+                // Update existing department
+                await updateDoc(doc(db, `artifacts/${__app_id}/users/${userId}/departamentos`, currentDepartment.id), departmentData);
+                showModal("Éxito", "Departamento actualizado correctamente.");
+            } else {
+                // Add new department
+                await addDoc(collection(db, `artifacts/${__app_id}/users/${userId}/departamentos`), departmentData);
+                showModal("Éxito", "Departamento agregado correctamente.");
+            }
+            resetForm();
+            setActiveSubSection('all'); // Go back to "Ver Todos" after saving
+        } catch (error) {
+            console.error("Error saving department:", error);
+            showModal("Error", "No se pudo guardar el departamento.");
+        }
+    };
+
+    // Function to reset the form
+    const resetForm = () => {
+        setCurrentDepartment(null);
+        setNumeroDepartamento('');
+        setRentaMensual('');
+        setDeposito('');
+        setOcupantesMaximos('');
+        setCargoAdicionalOcupanteExtra('0');
+        setEstadoOcupacion('Disponible'); // Reset new field
+        setDescripcionDepartamento('');
+        setCalle(''); // Reset new field
+        setNumeroExterior(''); // Reset new field
+        setNumeroInterior(''); // Reset new field
+        setColonia(''); // Reset new field
+        setCiudad(''); // Reset new field
+        setEstadoDireccion(''); // Reset new field
+        setCodigoPostal(''); // Reset new field
+    };
+
+    // Function to edit a department
+    const editDepartment = (department) => {
+        setCurrentDepartment(department);
+        setNumeroDepartamento(department.numeroDepartamento);
+        setRentaMensual(department.rentaMensual);
+        setDeposito(department.deposito);
+        setOcupantesMaximos(department.ocupantesMaximos);
+        setCargoAdicionalOcupanteExtra(department.cargoAdicionalOcupanteExtra || '0');
+        setEstadoOcupacion(department.estadoOcupacion || 'Disponible'); // Populate new field
+        setDescripcionDepartamento(department.descripcion || '');
+        setCalle(department.calle || ''); // Populate new field
+        setNumeroExterior(department.numeroExterior || ''); // Populate new field
+        setNumeroInterior(department.numeroInterior || ''); // Populate new field
+        setColonia(department.colonia || ''); // Populate new field
+        setCiudad(department.ciudad || ''); // Populate new field
+        setEstadoDireccion(department.estadoDireccion || ''); // Populate new field
+        setCodigoPostal(department.codigoPostal || ''); // Populate new field
+        setActiveSubSection('new'); // Switch to the form view
+    };
+
+    // Function to delete a department
+    const deleteDepartment = async (id) => {
+        const confirmed = await showModal("Confirmar Eliminación", "¿Estás seguro de que quieres eliminar este departamento? Esta acción es irreversible.", async () => {
+            try {
+                await deleteDoc(doc(db, `artifacts/${__app_id}/users/${userId}/departamentos`, id));
+                showModal("Éxito", "Departamento eliminado correctamente.", null, false); // No confirm button for success message
+            } catch (error) {
+                console.error("Error deleting department:", error);
+                showModal("Error", "No se pudo eliminar el departamento.");
+            }
+        });
+    };
+
+    // Filter departments for 'available' and 'occupied' based on estadoOcupacion
+    const availableDepartments = departments.filter(dept => dept.estadoOcupacion === 'Disponible');
+    const occupiedDepartments = departments.filter(dept => dept.estadoOcupacion === 'Ocupado');
+
+    // Render content based on activeSubSection
+    const renderContent = () => {
+        switch (activeSubSection) {
+            case 'new':
+                return (
+                    <div className="bg-gray-50 p-6 rounded-lg shadow-inner mb-8">
+                        <h3 className="text-2xl font-semibold text-gray-700 mb-4">{currentDepartment ? 'Editar Departamento' : 'Agregar Nuevo Departamento'}</h3>
+                        <form onSubmit={handleSubmit}>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="form-group">
+                                    <label htmlFor="numero-departamento" className="block text-sm font-medium text-gray-700">Número de Departamento:</label>
+                                    <input type="text" id="numero-departamento" value={numeroDepartamento} onChange={(e) => setNumeroDepartamento(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="renta-mensual" className="block text-sm font-medium text-gray-700">Renta Mensual:</label>
+                                    <input type="number" id="renta-mensual" step="0.01" value={rentaMensual} onChange={(e) => setRentaMensual(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="deposito" className="block text-sm font-medium text-gray-700">Depósito:</label>
+                                    <input type="number" id="deposito" step="0.01" value={deposito} onChange={(e) => setDeposito(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="ocupantes-maximos" className="block text-sm font-medium text-gray-700">Ocupantes Máximos:</label>
+                                    <input type="number" id="ocupantes-maximos" value={ocupantesMaximos} onChange={(e) => setOcupantesMaximos(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="cargo-adicional-ocupante-extra" className="block text-sm font-medium text-gray-700">Cargo Adicional por Ocupante Extra:</label>
+                                    <input type="number" id="cargo-adicional-ocupante-extra" step="0.01" value={cargoAdicionalOcupanteExtra} onChange={(e) => setCargoAdicionalOcupanteExtra(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="estado-ocupacion" className="block text-sm font-medium text-gray-700">Estado (Ocupación):</label>
+                                    <select id="estado-ocupacion" value={estadoOcupacion} onChange={(e) => setEstadoOcupacion(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2">
+                                        <option value="Disponible">Disponible</option>
+                                        <option value="Ocupado">Ocupado</option>
+                                    </select>
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="calle" className="block text-sm font-medium text-gray-700">Calle:</label>
+                                    <input type="text" id="calle" value={calle} onChange={(e) => setCalle(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="numero-exterior" className="block text-sm font-medium text-gray-700">Número Exterior:</label>
+                                    <input type="text" id="numero-exterior" value={numeroExterior} onChange={(e) => setNumeroExterior(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="numero-interior" className="block text-sm font-medium text-gray-700">Número Interior (Opcional):</label>
+                                    <input type="text" id="numero-interior" value={numeroInterior} onChange={(e) => setNumeroInterior(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="colonia" className="block text-sm font-medium text-gray-700">Colonia:</label>
+                                    <input type="text" id="colonia" value={colonia} onChange={(e) => setColonia(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="ciudad" className="block text-sm font-medium text-gray-700">Ciudad:</label>
+                                    <input type="text" id="ciudad" value={ciudad} onChange={(e) => setCiudad(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="estado-direccion" className="block text-sm font-medium text-gray-700">Estado (Dirección):</label>
+                                    <input type="text" id="estado-direccion" value={estadoDireccion} onChange={(e) => setEstadoDireccion(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="codigo-postal" className="block text-sm font-medium text-gray-700">Código Postal:</label>
+                                    <input type="text" id="codigo-postal" value={codigoPostal} onChange={(e) => setCodigoPostal(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group md:col-span-2">
+                                    <label htmlFor="descripcion-departamento" className="block text-sm font-medium text-gray-700">Descripción:</label>
+                                    <textarea id="descripcion-departamento" rows={3} value={descripcionDepartamento} onChange={(e) => setDescripcionDepartamento(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2"></textarea>
+                                </div>
+                            </div>
+                            <div className="flex justify-end gap-4 mt-6">
+                                <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition duration-150 ease-in-out">Guardar Departamento</button>
+                                <button type="button" onClick={() => { setActiveSubSection('all'); resetForm(); }} className="px-4 py-2 bg-gray-300 text-gray-800 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-opacity-50 transition duration-150 ease-in-out">Cancelar</button>
+                            </div>
+                        </form>
+                    </div>
+                );
+            case 'all':
+            case null: // Default to all if no specific sub-section is active
+                return (
+                    <div className="overflow-x-auto">
+                        <h3 className="text-2xl font-semibold text-gray-700 mb-4">Todos los Departamentos</h3>
+                        <table className="min-w-full bg-white rounded-lg shadow-md">
+                            <thead><tr><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Número</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Renta</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Depósito</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Ocupantes Máx.</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Estado</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Acciones</th></tr></thead>
+                            <tbody>{departments.map(dept => (<tr key={dept.id} className="hover:bg-gray-50"><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{dept.numeroDepartamento}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">${formatCurrency(dept.rentaMensual)}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">${formatCurrency(dept.deposito)}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{dept.ocupantesMaximos}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{dept.estadoOcupacion}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900"><button className="px-3 py-1 bg-yellow-500 text-white rounded-md hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 focus:ring-opacity-50 transition duration-150 ease-in-out" onClick={() => editDepartment(dept)}><i className="fas fa-edit"></i></button><button className="px-3 py-1 bg-red-600 text-white rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition duration-150 ease-in-out ml-2" onClick={() => deleteDepartment(dept.id)}><i className="fas fa-trash-alt"></i></button></td></tr>))}</tbody>
+                        </table>
+                    </div>
+                );
+            case 'available':
+                return (
+                    <div className="overflow-x-auto">
+                        <h3 className="text-2xl font-semibold text-gray-700 mb-4">Departamentos Disponibles</h3>
+                        <table className="min-w-full bg-white rounded-lg shadow-md">
+                            <thead><tr><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Número</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Renta</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Depósito</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Ocupantes Máx.</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Estado</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Acciones</th></tr></thead>
+                            <tbody>{availableDepartments.map(dept => (<tr key={dept.id} className="hover:bg-gray-50"><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{dept.numeroDepartamento}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">${formatCurrency(dept.rentaMensual)}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">${formatCurrency(dept.deposito)}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{dept.ocupantesMaximos}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{dept.estadoOcupacion}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900"><button className="px-3 py-1 bg-yellow-500 text-white rounded-md hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 focus:ring-opacity-50 transition duration-150 ease-in-out" onClick={() => editDepartment(dept)}><i className="fas fa-edit"></i></button><button className="px-3 py-1 bg-red-600 text-white rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition duration-150 ease-in-out ml-2" onClick={() => deleteDepartment(dept.id)}><i className="fas fa-trash-alt"></i></button></td></tr>))}</tbody>
+                        </table>
+                    </div>
+                );
+            case 'occupied':
+                return (
+                    <div className="overflow-x-auto">
+                        <h3 className="text-2xl font-semibold text-gray-700 mb-4">Departamentos Ocupados</h3>
+                        <table className="min-w-full bg-white rounded-lg shadow-md">
+                            <thead><tr><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Número</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Renta</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Depósito</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Ocupantes Máx.</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Estado</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Acciones</th></tr></thead>
+                            <tbody>{occupiedDepartments.map(dept => (<tr key={dept.id} className="hover:bg-gray-50"><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{dept.numeroDepartamento}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">${formatCurrency(dept.rentaMensual)}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">${formatCurrency(dept.deposito)}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{dept.ocupantesMaximos}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{dept.estadoOcupacion}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900"><button className="px-3 py-1 bg-yellow-500 text-white rounded-md hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 focus:ring-opacity-50 transition duration-150 ease-in-out" onClick={() => editDepartment(dept)}><i className="fas fa-edit"></i></button><button className="px-3 py-1 bg-red-600 text-white rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition duration-150 ease-in-out ml-2" onClick={() => deleteDepartment(dept.id)}><i className="fas fa-trash-alt"></i></button></td></tr>))}</tbody>
+                        </table>
+                    </div>
+                );
+            default:
+                return (
+                    <div className="bg-gray-50 p-6 rounded-lg shadow-inner mb-8">
+                        <p className="text-gray-600">Seleccione una opción del submenú para gestionar los departamentos.</p>
+                    </div>
+                );
+        }
+    };
+
+    return (
+        <section>
+            <h2 className="text-3xl font-bold text-gray-800 mb-6">Gestión de Departamentos</h2>
+            {renderContent()}
+        </section>
+    );
+};
+
+// Componente de la Sección de Arrendatarios
+const ArrendatariosSection = ({ activeSubSection, setActiveSubSection, departmentsData }) => {
+    const { db, userId, showModal } = useContext(FirebaseContext);
+    const [tenants, setTenants] = useState([]);
+    const [currentTenant, setCurrentTenant] = useState(null);
+    const [edadError, setEdadError] = useState(false);
+
+    // Form state for tenants
+    const [nombre, setNombre] = useState('');
+    const [apellido, setApellido] = useState('');
+    const [telefono, setTelefono] = useState('');
+    const [email, setEmail] = useState('');
+    const [fechaNacimiento, setFechaNacimiento] = useState('');
+    const [rfc, setRfc] = useState('');
+    const [curp, setCurp] = useState('');
+    const [identificacion, setIdentificacion] = useState('');
+    const [numeroOcupantes, setNumeroOcupantes] = useState(1);
+    const [departamentoAsignado, setDepartamentoAsignado] = useState('');
+    const [fechaInicioContrato, setFechaInicioContrato] = useState('');
+    const [fechaFinContrato, setFechaFinContrato] = useState('');
+    const [comentarios, setComentarios] = useState('');
+
+    // Effect to load tenants data
+    useEffect(() => {
+        if (!db || !userId) return;
+
+        const q = collection(db, `artifacts/${__app_id}/users/${userId}/arrendatarios`);
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const tenantsData = [];
+            snapshot.forEach(doc => {
+                tenantsData.push({ id: doc.id, ...doc.data() });
+            });
+            setTenants(tenantsData);
+        }, (error) => {
+            console.error("Error loading tenants:", error);
+            showModal("Error de Carga", "No se pudieron cargar los arrendatarios.");
+        });
+
+        return () => unsubscribe(); // Cleanup listener
+    }, [db, userId, showModal]);
+
+    // Handle form submission (Add/Edit Tenant)
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+
+        if (!validateAge(fechaNacimiento)) {
+            setEdadError(true);
+            return;
+        } else {
+            setEdadError(false);
+        }
+
+        try {
+            const tenantData = {
+                nombre,
+                apellido,
+                telefono,
+                email,
+                fechaNacimiento,
+                rfc,
+                curp,
+                identificacion,
+                numeroOcupantes: parseInt(numeroOcupantes),
+                departamentoAsignado,
+                fechaInicioContrato,
+                fechaFinContrato,
+                comentarios
+            };
+
+            if (currentTenant) {
+                // Update existing tenant
+                await updateDoc(doc(db, `artifacts/${__app_id}/users/${userId}/arrendatarios`, currentTenant.id), tenantData);
+                showModal("Éxito", "Arrendatario actualizado correctamente.");
+            } else {
+                // Add new tenant
+                await addDoc(collection(db, `artifacts/${__app_id}/users/${userId}/arrendatarios`), tenantData);
+                showModal("Éxito", "Arrendatario agregado correctamente.");
+            }
+            resetForm();
+            setActiveSubSection('all'); // Go back to "Lista de arrendatarios" after saving
+        } catch (error) {
+            console.error("Error saving tenant:", error);
+            showModal("Error", "No se pudo guardar el arrendatario.");
+        }
+    };
+
+    // Function to reset the form
+    const resetForm = () => {
+        setCurrentTenant(null);
+        setNombre('');
+        setApellido('');
+        setTelefono('');
+        setEmail('');
+        setFechaNacimiento('');
+        setRfc('');
+        setCurp('');
+        setIdentificacion('');
+        setNumeroOcupantes(1);
+        setDepartamentoAsignado('');
+        setFechaInicioContrato('');
+        setFechaFinContrato('');
+        setComentarios('');
+        setEdadError(false);
+    };
+
+    // Function to edit a tenant
+    const editTenant = (tenant) => {
+        setCurrentTenant(tenant);
+        setNombre(tenant.nombre);
+        setApellido(tenant.apellido);
+        setTelefono(tenant.telefono || '');
+        setEmail(tenant.email || '');
+        setFechaNacimiento(tenant.fechaNacimiento || '');
+        setRfc(tenant.rfc || '');
+        setCurp(tenant.curp || '');
+        setIdentificacion(tenant.identificacion || '');
+        setNumeroOcupantes(tenant.numeroOcupantes || 1);
+        setDepartamentoAsignado(tenant.departamentoAsignado || '');
+        setFechaInicioContrato(tenant.fechaInicioContrato || '');
+        setFechaFinContrato(tenant.fechaFinContrato || '');
+        setComentarios(tenant.comentarios || '');
+        setActiveSubSection('new'); // Switch to the form view
+    };
+
+    // Function to delete a tenant
+    const deleteTenant = async (id) => {
+        const confirmed = await showModal("Confirmar Eliminación", "¿Estás seguro de que quieres eliminar este arrendatario? Esta acción es irreversible.", async () => {
+            try {
+                await deleteDoc(doc(db, `artifacts/${__app_id}/users/${userId}/arrendatarios`, id));
+                showModal("Éxito", "Arrendatario eliminado correctamente.", null, false);
+            } catch (error) {
+                console.error("Error deleting tenant:", error);
+                showModal("Error", "No se pudo eliminar el arrendatario.");
+            }
+        });
+    };
+
+    // Filter tenants for 'active' and 'inactive'
+    const activeTenants = tenants.filter(tenant => {
+        const today = new Date();
+        const endDate = new Date(tenant.fechaFinContrato);
+        return endDate >= today;
+    });
+    const inactiveTenants = tenants.filter(tenant => {
+        const today = new Date();
+        const endDate = new Date(tenant.fechaFinContrato);
+        return endDate < today;
+    });
+
+    // Render content based on activeSubSection
+    const renderContent = () => {
+        switch (activeSubSection) {
+            case 'new':
+                return (
+                    <div className="bg-gray-50 p-6 rounded-lg shadow-inner mb-8">
+                        <h3 className="text-2xl font-semibold text-gray-700 mb-4">{currentTenant ? 'Editar Arrendatario' : 'Agregar Nuevo Arrendatario'}</h3>
+                        <form onSubmit={handleSubmit}>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="form-group">
+                                    <label htmlFor="arrendatario-nombre" className="block text-sm font-medium text-gray-700">Nombre:</label>
+                                    <input type="text" id="arrendatario-nombre" value={nombre} onChange={(e) => setNombre(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="arrendatario-apellido" className="block text-sm font-medium text-gray-700">Apellido:</label>
+                                    <input type="text" id="arrendatario-apellido" value={apellido} onChange={(e) => setApellido(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="arrendatario-telefono" className="block text-sm font-medium text-gray-700">Teléfono:</label>
+                                    <input type="tel" id="arrendatario-telefono" value={telefono} onChange={(e) => setTelefono(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="arrendatario-email" className="block text-sm font-medium text-gray-700">Email:</label>
+                                    <input type="email" id="arrendatario-email" value={email} onChange={(e) => setEmail(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="arrendatario-fecha-nacimiento" className="block text-sm font-medium text-gray-700">Fecha de Nacimiento:</label>
+                                    <input type="date" id="arrendatario-fecha-nacimiento" value={fechaNacimiento} onChange={(e) => setFechaNacimiento(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                    {edadError && <p className="text-red-500 text-sm mt-1">El arrendatario debe ser mayor de 18 años.</p>}
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="arrendatario-rfc" className="block text-sm font-medium text-gray-700">RFC:</label>
+                                    <input type="text" id="arrendatario-rfc" value={rfc} onChange={(e) => setRfc(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="arrendatario-curp" className="block text-sm font-medium text-gray-700">CURP:</label>
+                                    <input type="text" id="arrendatario-curp" value={curp} onChange={(e) => setCurp(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="arrendatario-identificacion" className="block text-sm font-medium text-gray-700">No. Identificación (INE/Pasaporte):</label>
+                                    <input type="text" id="arrendatario-identificacion" value={identificacion} onChange={(e) => setIdentificacion(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="arrendatario-numero-ocupantes" className="block text-sm font-medium text-gray-700">Número de Ocupantes:</label>
+                                    <input type="number" id="arrendatario-numero-ocupantes" value={numeroOcupantes} onChange={(e) => setNumeroOcupantes(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="arrendatario-departamento-asignado" className="block text-sm font-medium text-gray-700">Departamento Asignado:</label>
+                                    <select id="arrendatario-departamento-asignado" value={departamentoAsignado} onChange={(e) => setDepartamentoAsignado(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2">
+                                        <option value="">Seleccione un departamento</option>
+                                        {departmentsData.map(dept => (
+                                            <option key={dept.id} value={dept.id}>{dept.numeroDepartamento}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="arrendatario-fecha-inicio-contrato" className="block text-sm font-medium text-gray-700">Fecha Inicio Contrato:</label>
+                                    <input type="date" id="arrendatario-fecha-inicio-contrato" value={fechaInicioContrato} onChange={(e) => setFechaInicioContrato(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="arrendatario-fecha-fin-contrato" className="block text-sm font-medium text-gray-700">Fecha Fin Contrato:</label>
+                                    <input type="date" id="arrendatario-fecha-fin-contrato" value={fechaFinContrato} onChange={(e) => setFechaFinContrato(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group md:col-span-2">
+                                    <label htmlFor="arrendatario-comentarios" className="block text-sm font-medium text-gray-700">Comentarios:</label>
+                                    <textarea id="arrendatario-comentarios" rows={3} value={comentarios} onChange={(e) => setComentarios(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2"></textarea>
+                                </div>
+                            </div>
+                            <div className="flex justify-end gap-4 mt-6">
+                                <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition duration-150 ease-in-out">Guardar Arrendatario</button>
+                                <button type="button" onClick={() => { setActiveSubSection('all'); resetForm(); }} className="px-4 py-2 bg-gray-300 text-gray-800 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-opacity-50 transition duration-150 ease-in-out">Cancelar</button>
+                            </div>
+                        </form>
+                    </div>
+                );
+            case 'all':
+                return (
+                    <div className="overflow-x-auto">
+                        <h3 className="text-2xl font-semibold text-gray-700 mb-4">Lista de Arrendatarios</h3>
+                        <table className="min-w-full bg-white rounded-lg shadow-md">
+                            <thead><tr><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Nombre</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Teléfono</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Email</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Departamento</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Inicio Contrato</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Fin Contrato</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Acciones</th></tr></thead>
+                            <tbody>{tenants.map(tenant => (<tr key={tenant.id} className="hover:bg-gray-50"><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{tenant.nombre} {tenant.apellido}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{tenant.telefono || ''}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{tenant.email || ''}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{departmentsData.find(d => d.id === tenant.departamentoAsignado)?.numeroDepartamento || 'N/A'}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{tenant.fechaInicioContrato || 'N/A'}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{tenant.fechaFinContrato || 'N/A'}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900"><button className="px-3 py-1 bg-yellow-500 text-white rounded-md hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 focus:ring-opacity-50 transition duration-150 ease-in-out" onClick={() => editTenant(tenant)}><i className="fas fa-edit"></i></button><button className="px-3 py-1 bg-red-600 text-white rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition duration-150 ease-in-out ml-2" onClick={() => deleteTenant(tenant.id)}><i className="fas fa-trash-alt"></i></button></td></tr>))}</tbody>
+                        </table>
+                    </div>
+                );
+            case 'details':
+                return (
+                    <div className="bg-gray-50 p-6 rounded-lg shadow-inner mb-8">
+                        <h3 className="text-2xl font-semibold text-gray-700 mb-4">Datos del Arrendatario (Seleccione uno de la lista)</h3>
+                        <p className="text-gray-600">Por favor, vaya a "Lista de arrendatarios" y haga clic en "Editar" para ver los detalles de un arrendatario específico.</p>
+                    </div>
+                );
+            case 'active':
+                return (
+                    <div className="overflow-x-auto">
+                        <h3 className="text-2xl font-semibold text-gray-700 mb-4">Arrendatarios Activos</h3>
+                        <table className="min-w-full bg-white rounded-lg shadow-md">
+                            <thead><tr><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Nombre</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Teléfono</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Email</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Departamento</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Inicio Contrato</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Fin Contrato</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Acciones</th></tr></thead>
+                            <tbody>{activeTenants.map(tenant => (<tr key={tenant.id} className="hover:bg-gray-50"><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{tenant.nombre} {tenant.apellido}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{tenant.telefono || ''}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{tenant.email || ''}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{departmentsData.find(d => d.id === tenant.departamentoAsignado)?.numeroDepartamento || 'N/A'}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{tenant.fechaInicioContrato || 'N/A'}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{tenant.fechaFinContrato || 'N/A'}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900"><button className="px-3 py-1 bg-yellow-500 text-white rounded-md hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 focus:ring-opacity-50 transition duration-150 ease-in-out" onClick={() => editTenant(tenant)}><i className="fas fa-edit"></i></button><button className="px-3 py-1 bg-red-600 text-white rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition duration-150 ease-in-out ml-2" onClick={() => deleteTenant(tenant.id)}><i className="fas fa-trash-alt"></i></button></td></tr>))}</tbody>
+                        </table>
+                    </div>
+                );
+            case 'inactive':
+                return (
+                    <div className="overflow-x-auto">
+                        <h3 className="text-2xl font-semibold text-gray-700 mb-4">Arrendatarios Inactivos</h3>
+                        <table className="min-w-full bg-white rounded-lg shadow-md">
+                            <thead><tr><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Nombre</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Teléfono</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Email</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Departamento</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Inicio Contrato</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Fin Contrato</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Acciones</th></tr></thead>
+                            <tbody>{inactiveTenants.map(tenant => (<tr key={tenant.id} className="hover:bg-gray-50"><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{tenant.nombre} {tenant.apellido}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{tenant.telefono || ''}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{tenant.email || ''}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{departmentsData.find(d => d.id === tenant.departamentoAsignado)?.numeroDepartamento || 'N/A'}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{tenant.fechaInicioContrato || 'N/A'}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{tenant.fechaFinContrato || 'N/A'}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900"><button className="px-3 py-1 bg-yellow-500 text-white rounded-md hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-yellow-400 focus:ring-opacity-50 transition duration-150 ease-in-out" onClick={() => editTenant(tenant)}><i className="fas fa-edit"></i></button><button className="px-3 py-1 bg-red-600 text-white rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition duration-150 ease-in-out ml-2" onClick={() => deleteTenant(tenant.id)}><i className="fas fa-trash-alt"></i></button></td></tr>))}</tbody>
+                        </table>
+                    </div>
+                );
+            default:
+                return (
+                    <div className="bg-gray-50 p-6 rounded-lg shadow-inner mb-8">
+                        <p className="text-gray-600">Seleccione una opción del submenú para gestionar los arrendatarios.</p>
+                    </div>
+                );
+        }
+    };
+
+    return (
+        <section>
+            <h2 className="text-3xl font-bold text-gray-800 mb-6">Gestión de Arrendatarios</h2>
+            {renderContent()}
+        </section>
+    );
+};
+
+// Componente de la Sección de Contratos
+const ContratosSection = ({ activeSubSection, setActiveSubSection, departmentsData, tenantsData }) => {
+    const { db, userId, showModal } = useContext(FirebaseContext);
+    const [contracts, setContracts] = useState([]);
+    const [generatedContractText, setGeneratedContractText] = useState('');
+
+    // Form state for contracts
+    const [contratoFecha, setContratoFecha] = useState(new Date().toISOString().slice(0, 10));
+    const [contratoNumeroCuenta, setContratoNumeroCuenta] = useState('');
+    const [contratoArrendatarioId, setContratoArrendatarioId] = useState('');
+    const [contratoDepartamentoId, setContratoDepartamentoId] = useState('');
+    const [contratoDepositoEnseres, setContratoDepositoEnseres] = useState(0);
+    const [contratoDiaPagoMensual, setContratoDiaPagoMensual] = useState(1);
+    const [contratoDuracionDias, setContratoDuracionDias] = useState(365);
+
+    // Auto-filled contract data
+    const [autoArrendatarioNombre, setAutoArrendatarioNombre] = useState('N/A');
+    const [autoArrendatarioRFC, setAutoArrendatarioRFC] = useState('N/A');
+    const [autoArrendatarioCURP, setAutoArrendatarioCURP] = useState('N/A');
+    const [autoArrendatarioIdentificacion, setAutoArrendatarioIdentificacion] = useState('N/A');
+    const [autoDepartamentoNumero, setAutoDepartamentoNumero] = useState('N/A');
+    const [autoRentaMensualBase, setAutoRentaMensualBase] = useState('0.00');
+    const [autoDepositoBase, setAutoDepositoBase] = useState('0.00');
+    const [autoOcupantesMaximos, setAutoOcupantesMaximos] = useState('0');
+    const [autoCargoExtraOcupante, setAutoCargoExtraOcupante] = useState('0.00');
+    const [autoArrendatarioOcupantes, setAutoArrendatarioOcupantes] = useState('0');
+    const [autoArrendatarioInicioContrato, setAutoArrendatarioInicioContrato] = useState('N/A');
+    const [autoArrendatarioFinContrato, setAutoArrendatarioFinContrato] = useState('N/A');
+    const [autoPagoTotalRenta, setAutoPagoTotalRenta] = useState('0.00');
+
+    // Effect to load contracts data
+    useEffect(() => {
+        if (!db || !userId) return;
+
+        const q = collection(db, `artifacts/${__app_id}/users/${userId}/contratos`);
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const contractsData = [];
+            snapshot.forEach(doc => {
+                contractsData.push({ id: doc.id, ...doc.data() });
+            });
+            setContracts(contractsData);
+        }, (error) => {
+            console.error("Error loading contracts:", error);
+            showModal("Error de Carga", "No se pudieron cargar los contratos.");
+        });
+
+        return () => unsubscribe(); // Cleanup listener
+    }, [db, userId, showModal]);
+
+    // Effect to update auto-filled contract data
+    useEffect(() => {
+        const selectedTenant = tenantsData.find(t => t.id === contratoArrendatarioId);
+        const selectedDepartment = departmentsData.find(d => d.id === contratoDepartamentoId);
+
+        if (selectedTenant) {
+            setAutoArrendatarioNombre(`${selectedTenant.nombre} ${selectedTenant.apellido}`);
+            setAutoArrendatarioRFC(selectedTenant.rfc || 'N/A');
+            setAutoArrendatarioCURP(selectedTenant.curp || 'N/A');
+            setAutoArrendatarioIdentificacion(selectedTenant.identificacion || 'N/A');
+            setAutoArrendatarioOcupantes(selectedTenant.numeroOcupantes || 0);
+            setAutoArrendatarioInicioContrato(selectedTenant.fechaInicioContrato || 'N/A');
+            setAutoArrendatarioFinContrato(selectedTenant.fechaFinContrato || 'N/A');
+        } else {
+            setAutoArrendatarioNombre('N/A');
+            setAutoArrendatarioRFC('N/A');
+            setAutoArrendatarioCURP('N/A');
+            setAutoArrendatarioIdentificacion('N/A');
+            setAutoArrendatarioOcupantes('0');
+            setAutoArrendatarioInicioContrato('N/A');
+            setAutoArrendatarioFinContrato('N/A');
+        }
+
+        if (selectedDepartment) {
+            setAutoDepartamentoNumero(selectedDepartment.numeroDepartamento);
+            setAutoRentaMensualBase(formatCurrency(selectedDepartment.rentaMensual));
+            setAutoDepositoBase(formatCurrency(selectedDepartment.deposito));
+            setAutoOcupantesMaximos(selectedDepartment.ocupantesMaximos);
+            setAutoCargoExtraOcupante(formatCurrency(selectedDepartment.cargoAdicionalOcupanteExtra || 0));
+
+            let totalRenta = selectedDepartment.rentaMensual;
+            if (selectedTenant && selectedTenant.numeroOcupantes > selectedDepartment.ocupantesMaximos) {
+                const additionalOccupants = selectedTenant.numeroOcupantes - selectedDepartment.ocupantesMaximos;
+                totalRenta += (additionalOccupants * (selectedDepartment.cargoAdicionalOcupanteExtra || 0));
+            }
+            setAutoPagoTotalRenta(formatCurrency(totalRenta));
+        } else {
+            setAutoDepartamentoNumero('N/A');
+            setAutoRentaMensualBase('0.00');
+            setAutoDepositoBase('0.00');
+            setAutoOcupantesMaximos('0');
+            setAutoCargoExtraOcupante('0.00');
+            setAutoPagoTotalRenta('0.00');
+        }
+    }, [contratoArrendatarioId, contratoDepartamentoId, tenantsData, departmentsData]);
+
+    // Handle contract form submission
+    const handleGenerateContract = async (e) => {
+        e.preventDefault();
+
+        const selectedTenant = tenantsData.find(t => t.id === contratoArrendatarioId);
+        const selectedDepartment = departmentsData.find(d => d.id === contratoDepartamentoId);
+
+        if (!selectedTenant || !selectedDepartment) {
+            showModal("Error", "Debe seleccionar un arrendatario y un departamento válidos.");
+            return;
+        }
+
+        let pagoTotalRentaMensual = selectedDepartment.rentaMensual;
+        if (selectedTenant.numeroOcupantes > selectedDepartment.ocupantesMaximos) {
+            const additionalOccupants = selectedTenant.numeroOcupantes - selectedDepartment.ocupantesMaximos;
+            pagoTotalRentaMensual += (additionalOccupants * (selectedDepartment.cargoAdicionalOcupanteExtra || 0));
+        }
+
+        const contractData = {
+            fechaContrato: contratoFecha,
+            numeroCuenta: contratoNumeroCuenta,
+            arrendatarioId: selectedTenant.id,
+            arrendatarioNombreCompleto: `${selectedTenant.nombre} ${selectedTenant.apellido}`,
+            arrendatarioRFC: selectedTenant.rfc || 'N/A',
+            arrendatarioCURP: selectedTenant.curp || 'N/A',
+            arrendatarioIdentificacionTipo: 'INE', // Assuming INE as default
+            arrendatarioIdentificacionNumero: selectedTenant.identificacion || 'N/A',
+            arrendatarioNumeroOcupantes: selectedTenant.numeroOcupantes,
+            departamentoId: selectedDepartment.id,
+            departamentoNumero: selectedDepartment.numeroDepartamento,
+            rentaMensualBase: selectedDepartment.rentaMensual,
+            depositoBase: selectedDepartment.deposito,
+            depositoEnseres: parseFloat(contratoDepositoEnseres),
+            pagoTotalRentaMensual: pagoTotalRentaMensual,
+            diaPagoMensual: parseInt(contratoDiaPagoMensual),
+            duracionContratoDias: parseInt(contratoDuracionDias),
+            fechaInicioContratoTenant: selectedTenant.fechaInicioContrato,
+            fechaFinContratoTenant: selectedTenant.fechaFinContrato,
+            cargoAdicionalOcupanteExtra: selectedDepartment.cargoAdicionalOcupanteExtra || 0,
+            ocupantesMaximosDepartamento: selectedDepartment.ocupantesMaximos,
+            generadoEn: new Date().toISOString()
+        };
+
+        const text = generateContractText(contractData);
+        setGeneratedContractText(text);
+        setActiveSubSection('viewContract'); // Switch to contract display view
+
+        try {
+            await addDoc(collection(db, `artifacts/${__app_id}/users/${userId}/contratos`), contractData);
+            showModal("Éxito", "Contrato generado y guardado correctamente.", null, false);
+        } catch (error) {
+            console.error("Error saving contract:", error);
+            showModal("Error", "No se pudo guardar el contrato.");
+        }
+    };
+
+    // Function to generate contract text
+    const generateContractText = (data) => {
+        const contractDate = new Date(data.fechaContrato);
+        const formattedContractDate = formatDateForContract(contractDate);
+
+        const inicioContratoTenantDate = new Date(data.fechaInicioContratoTenant);
+        const finContratoTenantDate = new Date(data.fechaFinContratoTenant);
+        const formattedInicioContratoTenant = formatDateForContract(inicioContratoTenantDate);
+        const formattedFinContratoTenant = formatDateForContract(finContratoTenantDate);
+
+        const depositoBaseWords = numberToWords(data.depositoBase);
+        const depositoEnseresWords = numberToWords(data.depositoEnseres);
+        const pagoTotalRentaMensualWords = numberToWords(data.pagoTotalRentaMensual);
+
+        let personasAdicionalesText = '';
+        let cargoPorPersonasAdicionales = '';
+
+        if (data.arrendatarioNumeroOcupantes > data.ocupantesMaximosDepartamento) {
+            const additionalOccupantsCount = data.arrendatarioNumeroOcupantes - data.ocupantesMaximosDepartamento;
+            personasAdicionalesText = `Personas adicionales ${additionalOccupantsCount}`;
+            cargoPorPersonasAdicionales = `Cargo por $${formatCurrency(data.cargoAdicionalOcupanteExtra)} cada una.`;
+        } else {
+            personasAdicionalesText = `Personas adicionales SIN CARGO`;
+            cargoPorPersonasAdicionales = '';
+        }
+
+        return `
+CONTRATO DE ARRENDAMIENTO QUE CELEBRAN POR UNA PARTE, EN SU CARÁCTER DE ARRENDADOR EL C. XXXXXXXXXXXX, Y POR LA OTRA PARTE C. ${data.arrendatarioNombreCompleto}, QUIEN SE IDENTIFICÓ CON CREDENCIAL DEL ${data.arrendatarioIdentificacionTipo} CON NÚMERO ${data.arrendatarioIdentificacionNumero}, CON RFC: ${data.arrendatarioRFC}, CON CURP: ${data.arrendatarioCURP}, QUIENES SE SOMETEN A LAS SIGUIENTES DECLARACIONES Y CLÁUSULAS:
+
+DECLARACIONES
+
+I. Declara el ARRENDADOR ser legítimo propietario del inmueble ubicado en XXXXXXXXXXXX, DEPARTAMENTO Int. ${data.departamentoNumero}.
+II. Declara el ARRENDATARIO su conformidad con el estado actual del inmueble y su deseo de arrendarlo.
+
+CLÁUSULAS
+
+PRIMERA: OBJETO DEL CONTRATO. El ARRENDADOR otorga en arrendamiento al ARRENDATARIO el DEPARTAMENTO Int. ${data.departamentoNumero}, ubicado en XXXXXXXXXXXX.
+
+SEGUNDA: RENTA. El precio del arrendamiento es de $${formatCurrency(data.pagoTotalRentaMensual)} (${pagoTotalRentaMensualWords} MONEDA NACIONAL) mensuales, pagaderos los días ${data.diaPagoMensual} de cada mes.
+
+TERCERA: DEPÓSITO. El arrendatario deposita la cantidad de $${formatCurrency(data.depositoBase)} (${depositoBaseWords} MONEDA NACIONAL) como depósito en garantía, que será devuelto al término del contrato, previa revisión del inmueble. Adicionalmente, el arrendatario deposita $${formatCurrency(data.depositoEnseres)} (${depositoEnseresWords} PESOS MONEDA NACIONAL) por concepto de enseres.
+
+CUARTA: DURACIÓN. El contrato se celebra por el término de ${data.duracionContratoDias} días a partir del día ${formattedInicioContratoTenant}, hasta el día ${formattedFinContratoTenant}.
+
+QUINTA: OCUPANTES. Queda declarado que el departamento en renta es para ${data.ocupantesMaximosDepartamento} personas. ${personasAdicionalesText} ${cargoPorPersonasAdicionales}
+
+SEXTA: USO DEL INMUEBLE. El inmueble será utilizado exclusivamente como casa habitación.
+
+SÉPTIMA: MANTENIMIENTO. El ARRENDATARIO se obliga a mantener el inmueble en buen estado, siendo responsable de los daños causados por su negligencia o la de sus visitantes.
+
+OCTAVA: SERVICIOS. Los gastos por servicios como agua, luz, gas e internet serán cubiertos por el ARRENDATARIO.
+
+NOVENA: RESCISIÓN. El incumplimiento de cualquiera de las cláusulas será motivo de rescisión del presente contrato.
+
+DÉCIMA: JURISDICCIÓN. Para la interpretación y cumplimiento de este contrato, las partes se someten a la jurisdicción de los tribunales de la ciudad de Tijuana B.C.
+
+Leído el presente contrato en la ciudad de Tijuana B.C., a los ${formattedContractDate}, las partes lo firman de conformidad.
+
+ARRENDADOR
+_________________________
+
+ARRENDATARIO
+_________________________
+`;
+    };
+
+    // Function to download contract as PDF
+    const downloadContractPdf = () => {
+        const element = document.getElementById('contrato-text');
+        if (window.html2pdf) { // Check if html2pdf is loaded
+            window.html2pdf().from(element).save('contrato_arrendamiento.pdf');
+        } else {
+            showModal("Error", "La librería para generar PDF no está cargada. Por favor, intente de nuevo.");
+        }
+    };
+
+    // Function to re-print a saved contract
+    const reprintContract = async (contractId) => {
+        try {
+            const docRef = doc(db, `artifacts/${__app_id}/users/${userId}/contratos`, contractId);
+            const docSnap = await getDoc(docRef);
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                const text = generateContractText(data);
+                setGeneratedContractText(text);
+                setActiveSubSection('viewContract'); // Switch to contract display view
+            } else {
+                showModal("Error", "Contrato no encontrado para re-imprimir.");
+            }
+        } catch (error) {
+            console.error("Error re-printing contract:", error);
+            showModal("Error", "No se pudo re-imprimir el contrato.");
+        }
+    };
+
+    // Function to delete a contract
+    const deleteContract = async (id) => {
+        const confirmed = await showModal("Confirmar Eliminación", "¿Estás seguro de que quieres eliminar este contrato? Esta acción es irreversible.", async () => {
+            try {
+                await deleteDoc(doc(db, `artifacts/${__app_id}/users/${userId}/contratos`, id));
+                showModal("Éxito", "Contrato eliminado correctamente.", null, false);
+            } catch (error) {
+                console.error("Error deleting contract:", error);
+                showModal("Error", "No se pudo eliminar el contrato.");
+            }
+        });
+    };
+
+    // Render content based on activeSubSection
+    const renderContent = () => {
+        switch (activeSubSection) {
+            case 'newContract':
+                return (
+                    <div className="bg-gray-50 p-6 rounded-lg shadow-inner mb-8">
+                        <h3 className="text-2xl font-semibold text-gray-700 mb-4">Generar Contrato de Arrendamiento</h3>
+                        <form onSubmit={handleGenerateContract}>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="form-group">
+                                    <label htmlFor="contrato-fecha" className="block text-sm font-medium text-gray-700">Fecha del Contrato:</label>
+                                    <input type="date" id="contrato-fecha" value={contratoFecha} onChange={(e) => setContratoFecha(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="contrato-numero-cuenta" className="block text-sm font-medium text-gray-700">Número de Cuenta:</label>
+                                    <input type="text" id="contrato-numero-cuenta" value={contratoNumeroCuenta} onChange={(e) => setContratoNumeroCuenta(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="contrato-arrendatario-id" className="block text-sm font-medium text-gray-700">Seleccionar Arrendatario:</label>
+                                    <select id="contrato-arrendatario-id" value={contratoArrendatarioId} onChange={(e) => setContratoArrendatarioId(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2">
+                                        <option value="">Seleccione un arrendatario</option>
+                                        {tenantsData.map(tenant => (
+                                            <option key={tenant.id} value={tenant.id}>{tenant.nombre} {tenant.apellido}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="contrato-departamento-id" className="block text-sm font-medium text-gray-700">Seleccionar Departamento:</label>
+                                    <select id="contrato-departamento-id" value={contratoDepartamentoId} onChange={(e) => setContratoDepartamentoId(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2">
+                                        <option value="">Seleccione un departamento</option>
+                                        {departmentsData.map(dept => (
+                                            <option key={dept.id} value={dept.id}>{dept.numeroDepartamento}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="contrato-deposito-enseres" className="block text-sm font-medium text-gray-700">Depósito de Enseres ($):</label>
+                                    <input type="number" id="contrato-deposito-enseres" step="0.01" value={contratoDepositoEnseres} onChange={(e) => setContratoDepositoEnseres(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="contrato-dia-pago-mensual" className="block text-sm font-medium text-gray-700">Día de Pago Mensual (1-31):</label>
+                                    <input type="number" id="contrato-dia-pago-mensual" min="1" max="31" value={contratoDiaPagoMensual} onChange={(e) => setContratoDiaPagoMensual(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="contrato-duracion-dias" className="block text-sm font-medium text-gray-700">Duración del Contrato (días):</label>
+                                    <input type="number" id="contrato-duracion-dias" value={contratoDuracionDias} onChange={(e) => setContratoDuracionDias(e.target.value)} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm p-2" />
+                                </div>
+                            </div>
+                            <div className="bg-blue-50 p-4 rounded-lg mt-4 border border-blue-200">
+                                <h4 className="text-lg font-semibold text-blue-800 mb-2">Datos del Arrendatario y Departamento (Auto-rellenados):</h4>
+                                <p className="text-sm text-blue-700"><strong>Nombre Completo Arrendatario:</strong> <span id="auto-arrendatario-nombre">{autoArrendatarioNombre}</span></p>
+                                <p className="text-sm text-blue-700"><strong>RFC Arrendatario:</strong> <span id="auto-arrendatario-rfc">{autoArrendatarioRFC}</span></p>
+                                <p className="text-sm text-blue-700"><strong>CURP Arrendatario:</strong> <span id="auto-arrendatario-curp">{autoArrendatarioCURP}</span></p>
+                                <p className="text-sm text-blue-700"><strong>No. Identificación Arrendatario:</strong> <span id="auto-arrendatario-identificacion">{autoArrendatarioIdentificacion}</span></p>
+                                <p className="text-sm text-blue-700"><strong>Número de Departamento:</strong> <span id="auto-departamento-numero">{autoDepartamentoNumero}</span></p>
+                                <p className="text-sm text-blue-700"><strong>Renta Mensual Base:</strong> $<span id="auto-renta-mensual-base">{autoRentaMensualBase}</span></p>
+                                <p className="text-sm text-blue-700"><strong>Depósito Base:</strong> $<span id="auto-deposito-base">{autoDepositoBase}</span></p>
+                                <p className="text-sm text-blue-700"><strong>Ocupantes Máximos Departamento:</strong> <span id="auto-ocupantes-maximos">{autoOcupantesMaximos}</span></p>
+                                <p className="text-sm text-blue-700"><strong>Cargo Adicional por Ocupante Extra:</strong> $<span id="auto-cargo-extra-ocupante">{autoCargoExtraOcupante}</span></p>
+                                <p className="text-sm text-blue-700"><strong>Número de Ocupantes (Arrendatario):</strong> <span id="auto-arrendatario-ocupantes">{autoArrendatarioOcupantes}</span></p>
+                                <p className="text-sm text-blue-700"><strong>Fecha Inicio Contrato (Arrendatario):</strong> <span id="auto-arrendatario-inicio-contrato">{autoArrendatarioInicioContrato}</span></p>
+                                <p className="text-sm text-blue-700"><strong>Fecha Fin Contrato (Arrendatario):</strong> <span id="auto-arrendatario-fin-contrato">{autoArrendatarioFinContrato}</span></p>
+                                <p className="text-sm text-blue-700"><strong>Pago Total Renta Mensual:</strong> $<span id="auto-pago-total-renta">{autoPagoTotalRenta}</span></p>
+                            </div>
+                            <div className="flex justify-end gap-4 mt-6">
+                                <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition duration-150 ease-in-out">Generar y Guardar Contrato</button>
+                                <button type="button" onClick={() => setActiveSubSection('reprintContract')} className="px-4 py-2 bg-gray-300 text-gray-800 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-opacity-50 transition duration-150 ease-in-out">Cancelar</button>
+                            </div>
+                        </form>
+                    </div>
+                );
+            case 'viewContract':
+                return (
+                    <div className="bg-gray-100 p-6 rounded-lg shadow-inner mt-8">
+                        <h3 className="text-2xl font-semibold text-gray-700 mb-4">Contrato Generado</h3>
+                        <textarea id="contrato-text" className="w-full p-4 border border-gray-300 rounded-lg" rows="20" readOnly value={generatedContractText}></textarea>
+                        <div className="flex justify-end gap-4 mt-4">
+                            <button onClick={downloadContractPdf} className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition duration-150 ease-in-out">
+                                <i className="fas fa-download mr-2"></i>Descargar PDF
+                            </button>
+                            <button onClick={() => setActiveSubSection('reprintContract')} className="px-4 py-2 bg-gray-300 text-gray-800 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-opacity-50 transition duration-150 ease-in-out ml-2">
+                                <i className="fas fa-list mr-2"></i>Ver Contratos Guardados
+                            </button>
+                        </div>
+                    </div>
+                );
+            case 'reprintContract':
+            case null: // Default to all if no specific sub-section is active
+                return (
+                    <div className="overflow-x-auto mt-8">
+                        <h3 className="text-2xl font-semibold text-gray-700 mb-4">Contratos Guardados</h3>
+                        <table className="min-w-full bg-white rounded-lg shadow-md">
+                            <thead><tr><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Fecha</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Arrendatario</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Departamento</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Renta Mensual</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Acciones</th></tr></thead>
+                            <tbody>{contracts.map(contract => (<tr key={contract.id} className="hover:bg-gray-50"><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{contract.fechaContrato || 'N/A'}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{contract.arrendatarioNombreCompleto || 'N/A'}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{contract.departamentoNumero || 'N/A'}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">${formatCurrency(contract.pagoTotalRentaMensual || 0)}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900"><button className="px-3 py-1 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition duration-150 ease-in-out" onClick={() => reprintContract(contract.id)}><i className="fas fa-print"></i> Re-imprimir</button><button className="px-3 py-1 bg-red-600 text-white rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition duration-150 ease-in-out ml-2" onClick={() => deleteContract(contract.id)}><i className="fas fa-trash-alt"></i></button></td></tr>))}</tbody>
+                        </table>
+                    </div>
+                );
+            default:
+                return (
+                    <div className="bg-gray-50 p-6 rounded-lg shadow-inner mb-8">
+                        <p className="text-gray-600">Seleccione una opción del submenú para gestionar los contratos.</p>
+                    </div>
+                );
+        }
+    };
+
+    return (
+        <section>
+            <h2 className="text-3xl font-bold text-gray-800 mb-6">Generación de Contratos</h2>
+            {renderContent()}
+        </section>
+    );
+};
+
+// Componente de la Sección de Pagos
+const PagosSection = ({ activeSubSection }) => (
+    <section>
+        <h2 className="text-3xl font-bold text-gray-800 mb-6">Gestión de Pagos</h2>
+        <div className="bg-gray-50 p-6 rounded-lg shadow-inner mb-8">
+            {activeSubSection === 'newPayment' && <p className="text-gray-600">Formulario para registrar un nuevo pago.</p>}
+            {activeSubSection === 'collectedPayments' && <p className="text-gray-600">Tabla de pagos ya cobrados.</p>}
+            {activeSubSection === 'credits' && <p className="text-gray-600">Sección para gestionar abonos.</p>}
+            {activeSubSection === 'overdueBalances' && <p className="text-gray-600">Lista de saldos vencidos.</p>}
+            {!activeSubSection && <p className="text-gray-600">Este módulo está en desarrollo. Seleccione una opción del submenú.</p>}
+        </div>
+    </section>
+);
+
+// Componente de la Sección de Reportes
+const ReportesSection = ({ activeSubSection }) => (
+    <section>
+        <h2 className="text-3xl font-bold text-gray-800 mb-6">Generación de Reportes</h2>
+        <div className="bg-gray-50 p-6 rounded-lg shadow-inner mb-8">
+            {activeSubSection === 'futureCollections' && <p className="text-gray-600">Reporte de cobros futuros.</p>}
+            {activeSubSection === 'tenantAccountStatement' && <p className="text-gray-600">Generar estado de cuenta por arrendatario.</p>}
+            {!activeSubSection && <p className="text-gray-600">Este módulo está en desarrollo. Seleccione una opción del submenú.</p>}
+        </div>
+    </section>
+);
+
+// Componente de la Sección de Notificaciones
+const NotificacionesSection = ({ activeSubSection }) => (
+    <section>
+        <h2 className="text-3xl font-bold text-gray-800 mb-6">Notificaciones</h2>
+        <div className="bg-gray-50 p-6 rounded-lg shadow-inner mb-8">
+            {activeSubSection === 'collectToday' && <p className="text-gray-600">Notificaciones de cobros para hoy.</p>}
+            {activeSubSection === 'incompleteTenantData' && <p className="text-gray-600">Alertas sobre datos de arrendatarios incompletos.</p>}
+            {activeSubSection === 'expiringContracts' && <p className="text-gray-600">Lista de contratos próximos a vencer.</p>}
+            {!activeSubSection && <p className="text-gray-600">Este módulo está en desarrollo. Aquí recibirás alertas importantes sobre pagos y contratos. Seleccione una opción del submenú.</p>}
+        </div>
+    </section>
+);
+
+// Componente de la Sección Acerca de
+const AcercaDeSection = ({ systemInfo, versionLog }) => (
+    <section>
+        <h2 className="text-3xl font-bold text-gray-800 mb-6">Acerca de Sistema de Cobranza App</h2>
+        <div className="bg-gray-50 p-6 rounded-lg shadow-inner mb-8">
+            <p className="mb-2"><strong>Nombre del Sistema:</strong> {systemInfo.name}</p>
+            <p className="mb-2"><strong>Versión Actual:</strong> {systemInfo.version}</p>
+            <p className="mb-2"><strong>Fecha de Lanzamiento:</strong> {systemInfo.versionDate}</p>
+            <p className="mb-2"><strong>Inicio de Desarrollo:</strong> {systemInfo.developmentStartDate}</p>
+            <p className="mb-4"><strong>Equipo Técnico:</strong> {systemInfo.technicalTeam}</p>
+
+            <h3 className="text-2xl font-semibold text-gray-700 mb-4">Bitácora de Versiones</h3>
+            <div className="overflow-x-auto">
+                <table className="min-w-full bg-white rounded-lg shadow-md">
+                    <thead><tr><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Versión</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Fecha de Lanzamiento</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Descripción</th><th className="px-4 py-2 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Equipo Responsable</th></tr></thead>
+                    <tbody>{versionLog.map((log, index) => (<tr key={index} className="hover:bg-gray-50"><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{log.version}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{log.date}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{log.description}</td><td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">{log.responsible}</td></tr>))}</tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+);
+
+
+// Componente principal de la aplicación
+function App() {
+    const [db, setDb] = useState(null);
+    const [auth, setAuth] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const [loadingFirebase, setLoadingFirebase] = useState(true);
+    const [activeSection, setActiveSection] = useState('inicio'); // Sección activa, ahora por defecto 'inicio'
+
+    // States for sub-menu visibility
+    const [showDepartmentSubMenu, setShowDepartmentSubMenu] = useState(false);
+    const [showArrendatariosSubMenu, setShowArrendatariosSubMenu] = useState(false);
+    const [showPagosSubMenu, setShowPagosSubMenu] = useState(false);
+    const [showContratosSubMenu, setShowContratosSubMenu] = useState(false);
+    const [showReportesSubMenu, setShowReportesSubMenu] = useState(false);
+    const [showNotificacionesSubMenu, setShowNotificacionesSubMenu] = useState(false);
+
+    // States for active sub-sections within modules
+    const [activeDepartmentSubSection, setActiveDepartmentSubSection] = useState(null);
+    const [activeArrendatariosSubSection, setActiveArrendatariosSubSection] = useState(null);
+    const [activePagosSubSection, setActivePagosSubSection] = useState(null);
+    const [activeContratosSubSection, setActiveContratosSubSection] = useState(null);
+    const [activeReportesSubSection, setActiveReportesSubSection] = useState(null);
+    const [activeNotificacionesSubSection, setActiveNotificacionesSubSection] = useState(null);
+
+    // Modal state
+    const [isModalOpen, setIsModalOpen] = useState(false);
+    const [modalContent, setModalContent] = useState({ title: '', message: '', onConfirm: null });
+
+    // Data caches for cross-component use
+    const [departmentsData, setDepartmentsData] = useState([]);
+    const [tenantsData, setTenantsData] = useState([]);
+
+    // Information about the system version
+    const systemInfo = {
+        name: "Sistema de Cobranza App",
+        version: "1.0.3", // Current version
+        versionDate: "06 de Julio de 2025",
+        developmentStartDate: "01 de Julio de 2025",
+        technicalTeam: "Equipo de Desarrollo Gemini"
+    };
+
+    // Version log for the system
+    const versionLog = [
+        { version: "1.0.0", date: "01 de Julio de 2025", description: "Lanzamiento inicial del sistema con módulos de Departamentos, Arrendatarios, Contratos, Pagos, Reportes y Notificaciones. Incluye gestión básica de datos y generación de contratos.", responsible: "Equipo de Desarrollo Gemini" },
+        { version: "1.0.1", date: "02 de Julio de 2025", description: "Corrección de errores menores en la validación de formularios y mejoras en la interfaz de usuario.", responsible: "Equipo de Desarrollo Gemini" },
+        { version: "1.0.2", date: "04 de Julio de 2025", description: "Implementación de validación de edad para arrendatarios (mayores de 18 años).", responsible: "Equipo de Desarrollo Gemini" },
+        { version: "1.0.3", date: "06 de Julio de 2025", description: "Implementación del módulo 'Acerca de' y visualización de la versión en el footer. Mejoras en la generación de contratos y reportes PDF.", responsible: "Equipo de Desarrollo Gemini" },
+    ];
+
+    // Function to show the custom modal
+    const showModal = (title, message, onConfirm = null, showConfirmButton = true) => {
+        setModalContent({ title, message, onConfirm, showConfirmButton });
+        setIsModalOpen(true);
+    };
+
+    // Firebase initialization and authentication
+    useEffect(() => {
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+
+        if (Object.keys(firebaseConfig).length === 0) {
+            console.error("Firebase config is missing. Cannot initialize Firebase.");
+            setLoadingFirebase(false);
+            return;
+        }
+
+        const appInstance = initializeApp(firebaseConfig);
+        const firestoreDb = getFirestore(appInstance);
+        const firebaseAuth = getAuth(appInstance);
+
+        setDb(firestoreDb);
+        setAuth(firebaseAuth);
+
+        const unsubscribeAuth = onAuthStateChanged(firebaseAuth, async (user) => {
+            if (user) {
+                setUserId(user.uid);
+                console.log("Usuario autenticado:", user.uid);
+                // Load initial data after successful authentication
+                // Data loading moved to separate effects in respective components
+            } else {
+                console.log("No hay usuario autenticado, intentando inicio de sesión anónimo o con token.");
+                try {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(firebaseAuth, __initial_auth_token);
+                        console.log("Inicio de sesión con token personalizado exitoso.");
+                    } else {
+                        await signInAnonymously(firebaseAuth);
+                        console.log("Inicio de sesión anónimo exitoso.");
+                    }
+                } catch (error) {
+                    console.error("Error durante el inicio de sesión de Firebase:", error);
+                    showModal("Error de Autenticación", `No se pudo iniciar sesión en Firebase: ${error.message}`);
+                }
+            }
+            setLoadingFirebase(false);
+        });
+
+        // Dynamically load html2pdf.js
+        const script = document.createElement('script');
+        script.src = "https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js";
+        script.async = true;
+        script.onload = () => console.log("html2pdf.js loaded successfully");
+        script.onerror = (e) => console.error("Error loading html2pdf.js:", e);
+        document.body.appendChild(script); // Append to body to ensure it's loaded after DOM
+
+        // Cleanup listener and script on component unmount
+        return () => {
+            unsubscribeAuth();
+            if (document.body.contains(script)) {
+                document.body.removeChild(script);
+            }
+        };
+    }, []); // Empty dependency array to run only once on mount
+
+    // Effect to load departments data into App state for cross-component use
+    useEffect(() => {
+        if (!db || !userId) return;
+        const q = collection(db, `artifacts/${__app_id}/users/${userId}/departamentos`);
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const data = [];
+            snapshot.forEach(doc => data.push({ id: doc.id, ...doc.data() }));
+            setDepartmentsData(data);
+        }, (error) => {
+            console.error("Error loading departments for App state:", error);
+        });
+        return () => unsubscribe();
+    }, [db, userId]);
+
+    // Effect to load tenants data into App state for cross-component use
+    useEffect(() => {
+        if (!db || !userId) return;
+        const q = collection(db, `artifacts/${__app_id}/users/${userId}/arrendatarios`);
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const data = [];
+            snapshot.forEach(doc => data.push({ id: doc.id, ...doc.data() }));
+            setTenantsData(data);
+        }, (error) => {
+            console.error("Error loading tenants for App state:", error);
+        });
+        return () => unsubscribe();
+    }, [db, userId]);
+
+
+    // Function to handle logout
+    const handleLogout = async () => {
+        const confirmed = await showModal("Cerrar Sesión", "¿Estás seguro de que quieres cerrar tu sesión?", async () => {
+            try {
+                await signOut(auth);
+                showModal("Sesión Cerrada", "Has cerrado sesión exitosamente.", null, false);
+                setUserId(null); // Clear user ID on logout
+                setActiveSection('inicio'); // Go back to home
+            } catch (error) {
+                console.error("Error signing out:", error);
+                showModal("Error al Cerrar Sesión", "Hubo un problema al cerrar la sesión. Intente de nuevo.");
+            }
+        });
+    };
+
+    // Helper function to close all submenus
+    const closeAllSubmenus = () => {
+        setShowDepartmentSubMenu(false);
+        setShowArrendatariosSubMenu(false);
+        setShowPagosSubMenu(false);
+        setShowContratosSubMenu(false);
+        setShowReportesSubMenu(false);
+        setShowNotificacionesSubMenu(false);
+    };
+
+    if (loadingFirebase) {
+        return (
+            <div className="flex items-center justify-center h-screen bg-gray-100">
+                <div className="text-center text-gray-700">
+                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-gray-900 mx-auto mb-4"></div>
+                    <p className="text-lg">Cargando aplicación...</p>
+                </div>
+            </div>
+        );
+    }
+
+    if (!userId) {
+        return (
+            <div className="flex items-center justify-center h-screen bg-red-100 text-red-800 p-6">
+                <p className="text-lg">Error: No se pudo autenticar al usuario. Por favor, recargue la página.</p>
+            </div>
+        );
+    }
+
+    return (
+        <ErrorBoundary>
+            <FirebaseContext.Provider value={{ db, auth, userId, showModal }}>
+                <div className="min-h-screen bg-gray-100 font-sans text-gray-900 flex flex-col">
+                    {/* Encabezado */}
+                    <header className="bg-blue-700 text-white shadow-lg p-4">
+                        <div className="container mx-auto flex justify-between items-center">
+                            <h1 className="text-3xl font-bold">Sistema de Cobranza</h1>
+                            <div className="flex items-center space-x-4">
+                                <p className="text-sm text-blue-100">
+                                    ID de Usuario Actual: <span className="font-mono text-blue-200">{userId}</span>
+                                </p>
+                                <button
+                                    onClick={handleLogout}
+                                    className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition duration-150 ease-in-out"
+                                >
+                                    Cerrar Sesión
+                                </button>
+                            </div>
+                        </div>
+                    </header>
+
+                    {/* Contenido Principal con Barra Lateral */}
+                    <div className="flex flex-1">
+                        {/* Barra Lateral de Navegación */}
+                        <aside className="w-64 bg-blue-800 text-white p-4 shadow-xl flex-shrink-0 rounded-br-lg">
+                            <nav className="flex flex-col space-y-2 text-lg">
+                                {/* Inicio Button */}
+                                <button
+                                    onClick={() => {
+                                        setActiveSection('inicio');
+                                        closeAllSubmenus(); // Close all submenus
+                                    }}
+                                    className={`px-4 py-3 rounded-md text-left transition duration-300 ease-in-out ${activeSection === 'inicio' ? 'bg-blue-900 font-semibold' : 'hover:bg-blue-700'}`}
+                                >
+                                    🏠 Inicio
+                                </button>
+
+                                {/* Departamentos Parent Button (now controls sub-menu visibility) */}
+                                <button
+                                    onClick={() => {
+                                        setActiveSection('departamentos');
+                                        setActiveDepartmentSubSection('all'); // Set default sub-section
+                                        closeAllSubmenus(); // Close others first
+                                        setShowDepartmentSubMenu(prev => !prev); // Then toggle this one
+                                    }}
+                                    className={`px-4 py-3 rounded-md text-left transition duration-300 ease-in-out flex justify-between items-center ${activeSection === 'departamentos' ? 'bg-blue-900 font-semibold' : 'hover:bg-blue-700'}`}
+                                >
+                                    🏢 Departamentos
+                                    <span>{showDepartmentSubMenu ? '▲' : '▼'}</span>
+                                </button>
+
+                                {/* Sub-menu for Departamentos */}
+                                {showDepartmentSubMenu && (
+                                    <div className="flex flex-col pl-6 space-y-1">
+                                        <button
+                                            onClick={() => { setActiveDepartmentSubSection('new'); setActiveSection('departamentos'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeDepartmentSubSection === 'new' && activeSection === 'departamentos' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            ✨ Nuevo Departamento
+                                        </button>
+                                        <button
+                                            onClick={() => { setActiveDepartmentSubSection('all'); setActiveSection('departamentos'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeDepartmentSubSection === 'all' && activeSection === 'departamentos' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            📋 Ver Todos
+                                        </button>
+                                        <button
+                                            onClick={() => { setActiveDepartmentSubSection('available'); setActiveSection('departamentos'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeDepartmentSubSection === 'available' && activeSection === 'departamentos' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            ✅ Disponibles
+                                        </button>
+                                        <button
+                                            onClick={() => { setActiveDepartmentSubSection('occupied'); setActiveSection('departamentos'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeDepartmentSubSection === 'occupied' && activeSection === 'departamentos' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            🏠 Ocupados
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* Arrendatarios Parent Button (now controls sub-menu visibility) */}
+                                <button
+                                    onClick={() => {
+                                        setActiveSection('arrendatarios');
+                                        setActiveArrendatariosSubSection('all'); // Set default sub-section
+                                        closeAllSubmenus(); // Close others first
+                                        setShowArrendatariosSubMenu(prev => !prev); // Then toggle this one
+                                    }}
+                                    className={`px-4 py-3 rounded-md text-left transition duration-300 ease-in-out flex justify-between items-center ${activeSection === 'arrendatarios' ? 'bg-blue-900 font-semibold' : 'hover:bg-blue-700'}`}
+                                >
+                                    👥 Arrendatarios
+                                    <span>{showArrendatariosSubMenu ? '▲' : '▼'}</span>
+                                </button>
+
+                                {/* Sub-menu for Arrendatarios */}
+                                {showArrendatariosSubMenu && (
+                                    <div className="flex flex-col pl-6 space-y-1">
+                                        <button
+                                            onClick={() => { setActiveArrendatariosSubSection('new'); setActiveSection('arrendatarios'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeArrendatariosSubSection === 'new' && activeSection === 'arrendatarios' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            ➕ Nuevo
+                                        </button>
+                                        <button
+                                            onClick={() => { setActiveArrendatariosSubSection('all'); setActiveSection('arrendatarios'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeArrendatariosSubSection === 'all' && activeSection === 'arrendatarios' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            📋 Lista de arrendatarios
+                                        </button>
+                                        <button
+                                            onClick={() => { setActiveArrendatariosSubSection('details'); setActiveSection('arrendatarios'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeArrendatariosSubSection === 'details' && activeSection === 'arrendatarios' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            👤 Datos del arrendatario
+                                        </button>
+                                        <button
+                                            onClick={() => { setActiveArrendatariosSubSection('active'); setActiveSection('arrendatarios'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeArrendatariosSubSection === 'active' && activeSection === 'arrendatarios' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            ✅ Arrendatarios activos
+                                        </button>
+                                        <button
+                                            onClick={() => { setActiveArrendatariosSubSection('inactive'); setActiveSection('arrendatarios'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeArrendatariosSubSection === 'inactive' && activeSection === 'arrendatarios' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            ❌ Arrendatarios inactivos
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* Contratos Parent Button */}
+                                <button
+                                    onClick={() => {
+                                        setActiveSection('contratos');
+                                        setActiveContratosSubSection('reprintContract'); // Set default sub-section
+                                        closeAllSubmenus(); // Close others first
+                                        setShowContratosSubMenu(prev => !prev); // Then toggle this one
+                                    }}
+                                    className={`px-4 py-3 rounded-md text-left transition duration-300 ease-in-out flex justify-between items-center ${activeSection === 'contratos' ? 'bg-blue-900 font-semibold' : 'hover:bg-blue-700'}`}
+                                >
+                                    📄 Contratos
+                                    <span>{showContratosSubMenu ? '▲' : '▼'}</span>
+                                </button>
+
+                                {/* Sub-menu for Contratos */}
+                                {showContratosSubMenu && (
+                                    <div className="flex flex-col pl-6 space-y-1">
+                                        <button
+                                            onClick={() => { setActiveContratosSubSection('newContract'); setActiveSection('contratos'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeContratosSubSection === 'newContract' && activeSection === 'contratos' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            ➕ Nuevo Contrato
+                                        </button>
+                                        <button
+                                            onClick={() => { setActiveContratosSubSection('reprintContract'); setActiveSection('contratos'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeContratosSubSection === 'reprintContract' && activeSection === 'contratos' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            🖨️ Reimprimir Contrato
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* Pagos Parent Button (now controls sub-menu visibility) */}
+                                <button
+                                    onClick={() => {
+                                        setActiveSection('pagos');
+                                        setActivePagosSubSection(null); // Set default sub-section
+                                        closeAllSubmenus(); // Close others first
+                                        setShowPagosSubMenu(prev => !prev); // Then toggle this one
+                                    }}
+                                    className={`px-4 py-3 rounded-md text-left transition duration-300 ease-in-out flex justify-between items-center ${activeSection === 'pagos' ? 'bg-blue-900 font-semibold' : 'hover:bg-blue-700'}`}
+                                >
+                                    💰 Pagos
+                                    <span>{showPagosSubMenu ? '▲' : '▼'}</span>
+                                </button>
+
+                                {/* Sub-menu for Pagos */}
+                                {showPagosSubMenu && (
+                                    <div className="flex flex-col pl-6 space-y-1">
+                                        <button
+                                            onClick={() => { setActivePagosSubSection('newPayment'); setActiveSection('pagos'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activePagosSubSection === 'newPayment' && activeSection === 'pagos' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            ➕ Nuevo Pago
+                                        </button>
+                                        <button
+                                            onClick={() => { setActivePagosSubSection('collectedPayments'); setActiveSection('pagos'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activePagosSubSection === 'collectedPayments' && activeSection === 'pagos' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            ✅ Pagos Cobrados
+                                        </button>
+                                        <button
+                                            onClick={() => { setActivePagosSubSection('credits'); setActiveSection('pagos'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activePagosSubSection === 'credits' && activeSection === 'pagos' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            ➕ Abonos
+                                        </button>
+                                        <button
+                                            onClick={() => { setActivePagosSubSection('overdueBalances'); setActiveSection('pagos'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activePagosSubSection === 'overdueBalances' && activeSection === 'pagos' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            ⚠️ Saldos Vencidos
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* Reportes Parent Button */}
+                                <button
+                                    onClick={() => {
+                                        setActiveSection('reportes');
+                                        setActiveReportesSubSection(null); // Set default sub-section
+                                        closeAllSubmenus(); // Close others first
+                                        setShowReportesSubMenu(prev => !prev); // Then toggle this one
+                                    }}
+                                    className={`px-4 py-3 rounded-md text-left transition duration-300 ease-in-out flex justify-between items-center ${activeSection === 'reportes' ? 'bg-blue-900 font-semibold' : 'hover:bg-blue-700'}`}
+                                >
+                                    📊 Reportes
+                                    <span>{showReportesSubMenu ? '▲' : '▼'}</span>
+                                </button>
+
+                                {/* Sub-menu for Reportes */}
+                                {showReportesSubMenu && (
+                                    <div className="flex flex-col pl-6 space-y-1">
+                                        <button
+                                            onClick={() => { setActiveReportesSubSection('futureCollections'); setActiveSection('reportes'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeReportesSubSection === 'futureCollections' && activeSection === 'reportes' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            💸 Cobros Futuros
+                                        </button>
+                                        <button
+                                            onClick={() => { setActiveReportesSubSection('tenantAccountStatement'); setActiveSection('reportes'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeReportesSubSection === 'tenantAccountStatement' && activeSection === 'reportes' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            📝 Estado Cuenta del Arrendatario
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* Notificaciones Parent Button (now controls sub-menu visibility) */}
+                                <button
+                                    onClick={() => {
+                                        setActiveSection('notificaciones');
+                                        setActiveNotificacionesSubSection(null); // Set default sub-section
+                                        closeAllSubmenus(); // Close others first
+                                        setShowNotificacionesSubMenu(prev => !prev); // Then toggle this one
+                                    }}
+                                    className={`px-4 py-3 rounded-md text-left transition duration-300 ease-in-out flex justify-between items-center ${activeSection === 'notificaciones' ? 'bg-blue-900 font-semibold' : 'hover:bg-blue-700'}`}
+                                >
+                                    🔔 Notificaciones
+                                    <span>{showNotificacionesSubMenu ? '▲' : '▼'}</span>
+                                </button>
+
+                                {/* Sub-menu for Notificaciones */}
+                                {showNotificacionesSubMenu && (
+                                    <div className="flex flex-col pl-6 space-y-1">
+                                        <button
+                                            onClick={() => { setActiveNotificacionesSubSection('collectToday'); setActiveSection('notificaciones'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeNotificacionesSubSection === 'collectToday' && activeSection === 'notificaciones' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            📅 Cobrar Hoy
+                                        </button>
+                                        <button
+                                            onClick={() => { setActiveNotificacionesSubSection('incompleteTenantData'); setActiveSection('notificaciones'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeNotificacionesSubSection === 'incompleteTenantData' && activeSection === 'notificaciones' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            📝 Datos Incompletos del Arrendatario
+                                        </button>
+                                        <button
+                                            onClick={() => { setActiveNotificacionesSubSection('expiringContracts'); setActiveSection('notificaciones'); }}
+                                            className={`px-4 py-2 rounded-md text-left transition duration-300 ease-in-out ${activeNotificacionesSubSection === 'expiringContracts' && activeSection === 'notificaciones' ? 'bg-blue-700 font-semibold' : 'hover:bg-blue-600'}`}
+                                        >
+                                            ⏳ Contratos por Vencer
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* Acerca de Button */}
+                                <button
+                                    onClick={() => {
+                                        setActiveSection('acerca-de');
+                                        closeAllSubmenus(); // Close all submenus when navigating to "Acerca de"
+                                    }}
+                                    className={`px-4 py-3 rounded-md text-left transition duration-300 ease-in-out ${activeSection === 'acerca-de' ? 'bg-blue-900 font-semibold' : 'hover:bg-blue-700'}`}
+                                >
+                                    ℹ️ Acerca de
+                                </button>
+                            </nav>
+                        </aside>
+
+                        {/* Área de Contenido Principal */}
+                        <main className="flex-1 p-6 bg-white rounded-lg shadow-md m-4 overflow-y-auto">
+                            {activeSection === 'inicio' && <HomeSection />}
+                            {activeSection === 'departamentos' && <DepartamentosSection activeSubSection={activeDepartmentSubSection} setActiveSubSection={setActiveDepartmentSubSection} />}
+                            {activeSection === 'arrendatarios' && <ArrendatariosSection activeSubSection={activeArrendatariosSubSection} setActiveSubSection={setActiveArrendatariosSubSection} departmentsData={departmentsData} />}
+                            {activeSection === 'contratos' && <ContratosSection activeSubSection={activeContratosSubSection} setActiveSubSection={setActiveContratosSubSection} departmentsData={departmentsData} tenantsData={tenantsData} />}
+                            {activeSection === 'pagos' && <PagosSection activeSubSection={activePagosSubSection} />}
+                            {activeSection === 'reportes' && <ReportesSection activeSubSection={activeReportesSubSection} />}
+                            {activeSection === 'notificaciones' && <NotificacionesSection activeSubSection={activeNotificacionesSubSection} />}
+                            {activeSection === 'acerca-de' && <AcercaDeSection systemInfo={systemInfo} versionLog={versionLog} />}
+                        </main>
+                    </div>
+
+                    {/* Footer */}
+                    <footer className="bg-gray-800 text-white p-4 text-center text-sm shadow-inner">
+                        &copy; 2025 {systemInfo.name}. Versión {systemInfo.version}. Todos los derechos reservados.
+                    </footer>
+
+                    {/* Custom Modal */}
+                    <CustomModal
+                        isOpen={isModalOpen}
+                        onClose={() => setIsModalOpen(false)}
+                        title={modalContent.title}
+                        onConfirm={modalContent.onConfirm}
+                        showConfirmButton={modalContent.showConfirmButton}
+                    >
+                        <p>{modalContent.message}</p>
+                    </CustomModal>
+                </div>
+            </FirebaseContext.Provider>
+        </ErrorBoundary>
+    );
+}
+
+export default App;
